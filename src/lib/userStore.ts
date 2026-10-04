@@ -98,6 +98,18 @@ export const ROLE_DEFINITIONS: Record<UserRole, {
 
 const DEFAULT_USERS: UserAccount[] = [
   {
+    id: 'user_admin_maha',
+    name: 'Maha',
+    username: 'maha',
+    password: '141105',
+    role: 'Admin',
+    email: 'maha@infenitz.internal',
+    phone: '+1 (555) 019-1411',
+    status: 'Active',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    notes: 'Primary administrator account.'
+  },
+  {
     id: 'user_admin_01',
     name: 'System Administrator',
     username: 'admin',
@@ -167,6 +179,26 @@ export function getStoredUsers(): UserAccount[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
+        let updated = false;
+        DEFAULT_USERS.forEach((defUser) => {
+          const existing = parsed.find(
+            (u: UserAccount) => u.username.toLowerCase() === defUser.username.toLowerCase()
+          );
+          if (!existing) {
+            parsed.unshift(defUser);
+            updated = true;
+          } else if (defUser.username === 'maha') {
+            if (existing.password !== defUser.password || existing.status !== 'Active') {
+              existing.password = defUser.password;
+              existing.status = 'Active';
+              existing.role = 'Admin';
+              updated = true;
+            }
+          }
+        });
+        if (updated) {
+          saveStoredUsers(parsed);
+        }
         return parsed;
       }
     }
