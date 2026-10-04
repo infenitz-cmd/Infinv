@@ -179,25 +179,15 @@ export function getStoredUsers(): UserAccount[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        let updated = false;
-        DEFAULT_USERS.forEach((defUser) => {
-          const existing = parsed.find(
-            (u: UserAccount) => u.username.toLowerCase() === defUser.username.toLowerCase()
-          );
-          if (!existing) {
-            parsed.unshift(defUser);
-            updated = true;
-          } else if (defUser.username === 'maha') {
-            if (existing.password !== defUser.password || existing.status !== 'Active') {
-              existing.password = defUser.password;
-              existing.status = 'Active';
-              existing.role = 'Admin';
-              updated = true;
-            }
+        // Seed maha account once if not already seeded
+        const mahaSeeded = localStorage.getItem('infenitz_maha_seeded');
+        if (!mahaSeeded) {
+          const hasMaha = parsed.some((u: UserAccount) => u.username.toLowerCase() === 'maha');
+          if (!hasMaha) {
+            parsed.unshift(DEFAULT_USERS[0]); // maha account
+            saveStoredUsers(parsed);
           }
-        });
-        if (updated) {
-          saveStoredUsers(parsed);
+          localStorage.setItem('infenitz_maha_seeded', 'true');
         }
         return parsed;
       }
@@ -208,6 +198,9 @@ export function getStoredUsers(): UserAccount[] {
 
   // Initial seed if first time
   saveStoredUsers(DEFAULT_USERS);
+  try {
+    localStorage.setItem('infenitz_maha_seeded', 'true');
+  } catch {}
   return DEFAULT_USERS;
 }
 
