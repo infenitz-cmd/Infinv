@@ -203,11 +203,29 @@ export const HomePage: React.FC<HomePageProps> = ({ username, onLogout }) => {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [showConstraintNotice, setShowConstraintNotice] = useState(false);
 
-  // Current logged in user's role from user accounts
+  // Current logged in user's role from user accounts (Safe default: Staff)
   const currentUserRole = useMemo<UserRole>(() => {
+    const cleanU = (username || '').trim().toLowerCase();
     const list = getStoredUsers();
-    const match = list.find((u) => u.username.toLowerCase() === username.toLowerCase());
-    return match ? match.role : 'Admin';
+    const match = list.find(
+      (u) =>
+        u.username.trim().toLowerCase() === cleanU ||
+        (u.email && u.email.trim().toLowerCase() === cleanU)
+    );
+    if (match) {
+      try {
+        localStorage.setItem('infenitz_current_role', match.role);
+      } catch {}
+      return match.role;
+    }
+
+    const storedRole = localStorage.getItem('infenitz_current_role') as UserRole | null;
+    if (storedRole && ['Admin', 'Manager', 'Staff', 'Inventory Specialist'].includes(storedRole)) {
+      return storedRole;
+    }
+
+    // STRICT AND SAFE DEFAULT: If not found or role unclear, always default to 'Staff'!
+    return 'Staff';
   }, [username]);
 
   // Persistent Inventory Items list state (saves to localStorage)

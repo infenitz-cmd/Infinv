@@ -41,6 +41,7 @@ export function App() {
   const handleLogout = () => {
     try {
       localStorage.removeItem('infenitz_current_user');
+      localStorage.removeItem('infenitz_current_role');
     } catch (e) {
       console.error(e);
     }

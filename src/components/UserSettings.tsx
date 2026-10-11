@@ -317,8 +317,13 @@ export const UserSettings: React.FC<UserSettingsProps> = ({ currentUsername }) =
       if (error && error.code !== 'PGRST116') {
         throw error;
       }
+      const { error: attError } = await supabase.from('user_attendance').select('id').limit(1);
       setSupabaseTestStatus('success');
-      setSupabaseMessage('Successfully connected to Supabase PostgreSQL database!');
+      if (attError && (attError.code === '42P01' || attError.message?.includes('not find'))) {
+        setSupabaseMessage('Connected to Supabase! Table "inventory_items" is active. To enable cloud attendance sync across all devices, run the Attendance SQL script below in your Supabase SQL Editor.');
+      } else {
+        setSupabaseMessage('Successfully connected to Supabase PostgreSQL database! Both inventory & attendance cloud tables are active.');
+      }
       showToast('Database connection verified!');
     } catch (err: any) {
       setSupabaseTestStatus('error');
@@ -1024,6 +1029,60 @@ export const UserSettings: React.FC<UserSettingsProps> = ({ currentUsername }) =
                 <span>{supabaseMessage}</span>
               </div>
             )}
+
+            {/* Supabase Attendance Table Setup Script */}
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h4 className="font-bold text-sm text-slate-900">Attendance Cloud Sync (PostgreSQL Table)</h4>
+                  <p className="text-xs text-slate-500">Run this SQL in your Supabase SQL Editor to enable real-time attendance syncing across devices.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sql = `CREATE TABLE IF NOT EXISTS public.user_attendance (
+  id BIGSERIAL PRIMARY KEY,
+  username TEXT NOT NULL,
+  date TEXT NOT NULL,
+  status TEXT NOT NULL,
+  check_in_time TEXT,
+  check_out_time TEXT,
+  duration TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(username, date)
+);
+
+ALTER TABLE public.user_attendance ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow public all" ON public.user_attendance FOR ALL USING (true) WITH CHECK (true);`;
+                    navigator.clipboard.writeText(sql);
+                    showToast('Attendance SQL copied to clipboard!');
+                  }}
+                  className="px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all self-start sm:self-auto"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy SQL</span>
+                </button>
+              </div>
+
+              <div className="p-3 bg-slate-900 rounded-xl text-slate-200 font-mono text-[11px] overflow-x-auto border border-slate-800">
+                <code>{`CREATE TABLE IF NOT EXISTS public.user_attendance (
+  id BIGSERIAL PRIMARY KEY,
+  username TEXT NOT NULL,
+  date TEXT NOT NULL,
+  status TEXT NOT NULL,
+  check_in_time TEXT,
+  check_out_time TEXT,
+  duration TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(username, date)
+);
+
+ALTER TABLE public.user_attendance ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow public all" ON public.user_attendance FOR ALL USING (true) WITH CHECK (true);`}</code>
+              </div>
+            </div>
 
             {/* Backup & Export */}
             <div className="pt-4 border-t border-slate-100">

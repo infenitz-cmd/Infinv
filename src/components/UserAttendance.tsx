@@ -8,7 +8,6 @@ import {
   LogOut,
   ChevronLeft,
   ChevronRight,
-  Check,
   Award,
   Users,
   Search,
@@ -17,6 +16,7 @@ import {
 } from 'lucide-react';
 import { getStoredUsers, ROLE_DEFINITIONS } from '../lib/userStore';
 import type { UserAccount, UserRole } from '../lib/userStore';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
 
 interface UserAttendanceProps {
   username: string;
@@ -157,19 +157,50 @@ function generateInitialRecords(targetUsername: string): { [dateStr: string]: At
 }
 
 export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRole }) => {
-  const isAdmin = userRole === 'Admin';
-
   // Live Digital Clock
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
+
+  // Clock interval
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Safely resolve user role: strictly only Admin gets staff inspector powers.
+  // Staff and Inventory Specialists ALWAYS get only their personal punch-in portal!
+  const effectiveRole: UserRole = useMemo(() => {
+    if (userRole && ['Admin', 'Manager', 'Staff', 'Inventory Specialist'].includes(userRole)) {
+      return userRole;
+    }
+    const stored = localStorage.getItem('infenitz_current_role') as UserRole | null;
+    if (stored && ['Admin', 'Manager', 'Staff', 'Inventory Specialist'].includes(stored)) {
+      return stored;
+    }
+    const all = getStoredUsers();
+    const cleanU = (username || '').trim().toLowerCase();
+    const match = all.find(
+      (u) =>
+        u.username.trim().toLowerCase() === cleanU ||
+        (u.email && u.email.trim().toLowerCase() === cleanU)
+    );
+    if (match) return match.role;
+    return 'Staff';
+  }, [userRole, username]);
+
+  const isAdmin = effectiveRole === 'Admin';
+  // Admin can toggle between inspecting other staff and punching in their own attendance
+  const [adminViewMode, setAdminViewMode] = useState<'inspector' | 'myShift'>('inspector');
 
   // All registered users in system
   const [availableUsers, setAvailableUsers] = useState<UserAccount[]>(() => {
     const all = getStoredUsers();
-    // In admin mode, list non-admin staff first or all users
     return all;
   });
 
-  // Selected User for attendance inspection (defaults to first staff/manager if admin, or current user)
+  // Selected User for attendance inspection: only Admin can change this.
+  // For staff users, this is ALWAYS locked to their own username!
   const [selectedUsername, setSelectedUsername] = useState<string>(() => {
     if (isAdmin) {
       const all = getStoredUsers();
@@ -178,6 +209,24 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
     }
     return username;
   });
+
+  // Strict enforcement: Non-admins can NEVER inspect other users!
+  useEffect(() => {
+    if (!isAdmin && selectedUsername.toLowerCase() !== username.toLowerCase()) {
+      setSelectedUsername(username);
+    }
+  }, [isAdmin, username, selectedUsername]);
+
+  // Target user whose attendance is currently displayed:
+  // Admin in inspector mode -> selectedUsername
+  // Admin in myShift mode -> username
+  // Staff / Regular user -> username
+  const activeTargetUser = useMemo(() => {
+    if (isAdmin && adminViewMode === 'inspector') {
+      return selectedUsername;
+    }
+    return username;
+  }, [isAdmin, adminViewMode, selectedUsername, username]);
 
   const [userSearchQuery, setUserSearchQuery] = useState('');
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -200,7 +249,7 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
     return {};
   });
 
-  // Listen to storage changes from other tabs or updates
+  // Listen to storage changes and BroadcastChannel updates across tabs/windows
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
       if (e.key === STORAGE_KEY && e.newValue) {
@@ -215,37 +264,99 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
       }
     };
     window.addEventListener('storage', handleStorage);
-    return () => window.removeEventListener('storage', handleStorage);
+
+    let bc: BroadcastChannel | null = null;
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        bc = new BroadcastChannel('infenitz_attendance_sync');
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'ATTENDANCE_UPDATED' && event.data.data) {
+            setAllAttendanceData(event.data.data);
+          }
+        };
+      } catch {}
+    }
+
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      if (bc) bc.close();
+    };
   }, []);
 
-  // Ensure selected user has records generated if missing
+  // Fetch Supabase Cloud attendance records if configured
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    const fetchCloudAttendance = async () => {
+      try {
+        const { data, error } = await supabase.from('user_attendance').select('*');
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const cloudMap: StoredAttendanceData = {};
+          data.forEach((row: any) => {
+            const u = (row.username || '').toLowerCase().trim();
+            if (!u) return;
+            if (!cloudMap[u]) cloudMap[u] = {};
+            cloudMap[u][row.date] = {
+              date: row.date,
+              status: row.status as 'Present' | 'Absent',
+              checkInTime: row.check_in_time || undefined,
+              checkOutTime: row.check_out_time || undefined,
+              duration: row.duration || undefined,
+            };
+          });
+
+          setAllAttendanceData((prev) => {
+            const merged = { ...prev };
+            Object.keys(cloudMap).forEach((u) => {
+              merged[u] = { ...(merged[u] || {}), ...cloudMap[u] };
+            });
+            try {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+            } catch {}
+            return merged;
+          });
+        }
+      } catch {
+        // Fallback silently to localStorage
+      }
+    };
+    fetchCloudAttendance();
+  }, []);
+
+  const normalizeKey = (name: string) => (name || '').trim().toLowerCase();
+
+  // Ensure active target user has records generated or loaded
   const currentUserAttendance = useMemo(() => {
-    if (allAttendanceData[selectedUsername]) {
-      return allAttendanceData[selectedUsername];
+    const key = normalizeKey(activeTargetUser);
+    if (allAttendanceData[key]) {
+      return allAttendanceData[key];
     }
-    const initial = generateInitialRecords(selectedUsername);
+    if (allAttendanceData[activeTargetUser]) {
+      return allAttendanceData[activeTargetUser];
+    }
+    const initial = generateInitialRecords(key);
     const updated = {
       ...allAttendanceData,
-      [selectedUsername]: initial
+      [key]: initial
     };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
     } catch {}
     return initial;
-  }, [allAttendanceData, selectedUsername]);
-
-  // Clock interval
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+  }, [allAttendanceData, activeTargetUser]);
 
   // Selected User Object
   const selectedUserObject = useMemo(() => {
-    return availableUsers.find((u) => u.username.toLowerCase() === selectedUsername.toLowerCase());
-  }, [availableUsers, selectedUsername]);
+    return availableUsers.find(
+      (u) => u.username.toLowerCase() === activeTargetUser.toLowerCase()
+    );
+  }, [availableUsers, activeTargetUser]);
+
+  // Current logged in user object (for display)
+  const loggedInUserObject = useMemo(() => {
+    return availableUsers.find(
+      (u) => u.username.toLowerCase() === username.toLowerCase()
+    );
+  }, [availableUsers, username]);
 
   // Filtered Users for Admin selection
   const filteredUsers = useMemo(() => {
@@ -260,14 +371,58 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
   }, [availableUsers, userSearchQuery]);
 
   // Persist record helper
-  const saveAttendanceRecord = (newRecords: { [dateStr: string]: AttendanceRecord }) => {
+  const saveAttendanceRecord = (
+    newRecords: { [dateStr: string]: AttendanceRecord },
+    targetUser: string = activeTargetUser
+  ) => {
+    const key = normalizeKey(targetUser);
     const updated = {
       ...allAttendanceData,
-      [selectedUsername]: newRecords
+      [key]: newRecords
     };
     setAllAttendanceData(updated);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new StorageEvent('storage', { key: STORAGE_KEY, newValue: JSON.stringify(updated) })
+        );
+        if ('BroadcastChannel' in window) {
+          try {
+            const bc = new BroadcastChannel('infenitz_attendance_sync');
+            bc.postMessage({ type: 'ATTENDANCE_UPDATED', data: updated });
+            bc.close();
+          } catch {}
+        }
+      }
+
+      // Upsert to Supabase Cloud if configured
+      if (isSupabaseConfigured) {
+        const todayRec = newRecords[todayKey];
+        if (todayRec) {
+          (async () => {
+            try {
+              const { error } = await supabase.from('user_attendance').upsert(
+                {
+                  username: key,
+                  date: todayRec.date,
+                  status: todayRec.status,
+                  check_in_time: todayRec.checkInTime || null,
+                  check_out_time: todayRec.checkOutTime || null,
+                  duration: todayRec.duration || null,
+                  updated_at: new Date().toISOString(),
+                },
+                { onConflict: 'username,date' }
+              );
+              if (error && error.code !== '42P01') {
+                console.warn('Supabase attendance sync notice:', error.message);
+              }
+            } catch {
+              // Ignore network or table missing errors gracefully
+            }
+          })();
+        }
+      }
     } catch (err) {
       console.error('Failed to persist attendance:', err);
     }
@@ -280,7 +435,7 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
   const isCheckedIn = Boolean(todayRecord && todayRecord.checkInTime && !todayRecord.checkOutTime);
   const isCheckedOut = Boolean(todayRecord && todayRecord.checkOutTime);
 
-  // Handle Check In Click (for the user)
+  // Handle Check In Click (for punch in portal)
   const handleCheckIn = () => {
     const timeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
     const updated: AttendanceRecord = {
@@ -292,10 +447,10 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
       ...currentUserAttendance,
       [todayKey]: updated
     };
-    saveAttendanceRecord(newRecords);
+    saveAttendanceRecord(newRecords, activeTargetUser);
   };
 
-  // Handle Check Out Click (for the user)
+  // Handle Check Out Click (for punch out portal)
   const handleCheckOut = () => {
     if (!todayRecord) return;
     const timeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
@@ -308,7 +463,23 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
       ...currentUserAttendance,
       [todayKey]: updated
     };
-    saveAttendanceRecord(newRecords);
+    saveAttendanceRecord(newRecords, activeTargetUser);
+  };
+
+  // Handle Admin Manual Attendance marking for employee
+  const handleAdminQuickMark = (status: 'Present' | 'Absent') => {
+    const timeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+    const updated: AttendanceRecord = {
+      date: todayKey,
+      status,
+      checkInTime: status === 'Present' ? (todayRecord?.checkInTime || timeStr) : undefined,
+      checkOutTime: status === 'Present' ? todayRecord?.checkOutTime : undefined
+    };
+    const newRecords = {
+      ...currentUserAttendance,
+      [todayKey]: updated
+    };
+    saveAttendanceRecord(newRecords, activeTargetUser);
   };
 
   // Calendar calculations
@@ -321,7 +492,7 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
   const nextMonth = () => setViewDate(new Date(viewYear, viewMonth + 1, 1));
   const goToToday = () => setViewDate(new Date());
 
-  // Monthly stats for selected user
+  // Monthly stats for active target user
   const monthStats = useMemo(() => {
     let presentCount = 0;
     let absentCount = 0;
@@ -383,9 +554,49 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
       {/* ========================================================================= */}
-      {/* ADMIN CONTROLS: SELECT USER TO VIEW THEIR ATTENDANCE */}
+      {/* ADMIN CONTROLS: TABS TO SWITCH BETWEEN INSPECTOR AND MY SHIFT */}
       {/* ========================================================================= */}
-      {isAdmin ? (
+      {isAdmin && (
+        <div className="flex items-center justify-between bg-white rounded-2xl p-1.5 border border-slate-200 shadow-xs">
+          <div className="flex items-center gap-1.5 flex-1">
+            <button
+              type="button"
+              onClick={() => setAdminViewMode('inspector')}
+              className={`flex-1 sm:flex-none px-4 py-2 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 transition-all ${
+                adminViewMode === 'inspector'
+                  ? 'bg-slate-900 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Users className="w-3.5 h-3.5" />
+              <span>Inspect Staff Attendance</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setAdminViewMode('myShift')}
+              className={`flex-1 sm:flex-none px-4 py-2 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 transition-all ${
+                adminViewMode === 'myShift'
+                  ? 'bg-slate-900 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Clock className="w-3.5 h-3.5" />
+              <span>My Shift Punch-In</span>
+            </button>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-2 pr-3">
+            <span className="w-2 h-2 rounded-full bg-purple-600"></span>
+            <span className="text-[11px] font-bold text-slate-500">Admin Mode Active</span>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* VIEW 1: ADMIN STAFF INSPECTOR (VISIBLE ONLY TO ADMIN IN INSPECTOR MODE) */}
+      {/* ========================================================================= */}
+      {isAdmin && adminViewMode === 'inspector' ? (
         <div className="bg-white rounded-3xl p-6 sm:p-7 border border-slate-200/80 shadow-md space-y-5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -510,21 +721,74 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
               </div>
             </div>
           </div>
+
+          {/* Quick Mark Attendance for Employee for Today */}
+          <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs bg-slate-50/80 p-3.5 rounded-2xl">
+            <div className="flex items-center gap-2">
+              <span className="font-extrabold text-slate-700">Today's Status for {selectedUserObject?.name || selectedUsername}:</span>
+              {todayRecord ? (
+                <span className={`px-2 py-0.5 rounded-md font-bold ${todayRecord.status === 'Present' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
+                  {todayRecord.status} {todayRecord.checkInTime ? `(In: ${todayRecord.checkInTime})` : ''}
+                </span>
+              ) : (
+                <span className="text-slate-400 font-medium">No check-in recorded yet today</span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleAdminQuickMark('Present')}
+                className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition-all shadow-xs"
+              >
+                Mark Present
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAdminQuickMark('Absent')}
+                className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold transition-all shadow-xs"
+              >
+                Mark Absent
+              </button>
+            </div>
+          </div>
         </div>
       ) : (
         /* ========================================================================= */
-        /* REGULAR USER VIEW: DIGITAL CLOCK & CHECK-IN / CHECK-OUT */
+        /* VIEW 2: STAFF SHIFT PORTAL (STRICTLY FOR STAFF, AND ADMIN MY SHIFT MODE)  */
         /* ========================================================================= */
-        <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200/80 shadow-md relative overflow-hidden">
+        <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200/80 shadow-md relative overflow-hidden space-y-6">
           <div className="absolute -top-16 -right-16 w-56 h-56 bg-emerald-100/60 rounded-full blur-3xl pointer-events-none" />
           <div className="absolute -bottom-16 -left-16 w-56 h-56 bg-blue-100/60 rounded-full blur-3xl pointer-events-none" />
 
-          <div className="relative z-10 flex flex-col items-center text-center space-y-5">
-            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-100 text-slate-700 text-xs font-bold tracking-wide uppercase">
-              <Clock className="w-3.5 h-3.5 text-blue-600 animate-pulse" />
-              <span>Live System Time & Shift Portal</span>
+          {/* User Welcome Header */}
+          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-600 text-white flex items-center justify-center font-black text-sm shadow-md shadow-emerald-600/20">
+                {(loggedInUserObject?.name || username).charAt(0).toUpperCase()}
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-lg font-black text-slate-900">
+                    Shift & Attendance Portal
+                  </h3>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-emerald-100 text-emerald-800">
+                    {effectiveRole}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 font-medium">
+                  Logged in as <strong className="text-slate-800">{loggedInUserObject?.name || username}</strong> (@{username}). Punch in to start your shift.
+                </p>
+              </div>
             </div>
 
+            <div className="px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200 text-right self-start sm:self-auto">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Role Status</span>
+              <span className="text-xs font-extrabold text-emerald-700">Active Shift Keeper</span>
+            </div>
+          </div>
+
+          <div className="relative z-10 flex flex-col items-center text-center space-y-5">
             {/* Large Digital Clock */}
             <div className="space-y-1">
               <div className="flex items-baseline justify-center gap-1 sm:gap-2 font-mono tracking-tight text-slate-900">
@@ -539,25 +803,31 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
             </div>
 
             {/* Today's Check-in Status Banner */}
-            {todayRecord && (
-              <div className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-700">
-                {todayRecord.checkInTime && (
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
-                    <span>Checked In: <strong className="text-slate-900">{todayRecord.checkInTime}</strong></span>
-                  </div>
-                )}
-                {todayRecord.checkOutTime && (
-                  <div className="flex items-center gap-1.5 ml-3 pl-3 border-l border-slate-200">
-                    <Check className="w-3.5 h-3.5 text-blue-600" />
-                    <span>Checked Out: <strong className="text-slate-900">{todayRecord.checkOutTime}</strong></span>
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-700">
+              {todayRecord?.checkInTime ? (
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span>Checked In: <strong className="text-slate-900">{todayRecord.checkInTime}</strong></span>
+                  {todayRecord.checkOutTime ? (
+                    <span className="ml-2 pl-2 border-l border-slate-200 text-slate-600">
+                      Checked Out: <strong className="text-slate-900">{todayRecord.checkOutTime}</strong>
+                    </span>
+                  ) : (
+                    <span className="ml-2 px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-black uppercase">
+                      Shift in progress
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-slate-500">
+                  <Clock className="w-4 h-4 text-blue-500" />
+                  <span>Not checked in yet today. Click <strong className="text-slate-800">Check In</strong> below to record arrival.</span>
+                </div>
+              )}
+            </div>
 
             {/* Check In / Check Out Primary Button */}
-            <div className="w-full max-w-sm pt-2">
+            <div className="w-full max-w-sm pt-1">
               {!isCheckedIn && !isCheckedOut && (
                 <button
                   type="button"
@@ -565,7 +835,7 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
                   className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 active:scale-98 text-white font-extrabold text-base shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-3 transition-all cursor-pointer group"
                 >
                   <LogIn className="w-5 h-5 transition-transform group-hover:translate-x-0.5" />
-                  <span>Check In</span>
+                  <span>Check In (Start Shift)</span>
                 </button>
               )}
 
@@ -576,16 +846,36 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
                   className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-amber-600 to-rose-600 hover:from-amber-700 hover:to-rose-700 active:scale-98 text-white font-extrabold text-base shadow-lg shadow-rose-600/30 flex items-center justify-center gap-3 transition-all cursor-pointer group"
                 >
                   <LogOut className="w-5 h-5 transition-transform group-hover:translate-x-0.5" />
-                  <span>Check Out</span>
+                  <span>Check Out (End Shift)</span>
                 </button>
               )}
 
               {isCheckedOut && (
                 <div className="w-full py-3.5 px-6 rounded-2xl bg-emerald-50 border-2 border-emerald-500 text-emerald-800 font-extrabold text-sm flex items-center justify-center gap-2 shadow-xs">
                   <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                  <span>Attendance Recorded for Today</span>
+                  <span>Today's Shift Attendance Completed</span>
                 </div>
               )}
+            </div>
+
+            {/* Personal Month Metrics for the staff member */}
+            <div className="w-full pt-4 border-t border-slate-100 flex items-center justify-center gap-2 sm:gap-4 flex-wrap">
+              <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-100 text-center min-w-[95px] flex-1 sm:flex-none">
+                <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">Present</span>
+                <span className="text-lg font-black text-emerald-800">{monthStats.presentCount} Days</span>
+              </div>
+              <div className="p-3 rounded-2xl bg-red-50 border border-red-100 text-center min-w-[95px] flex-1 sm:flex-none">
+                <span className="text-[10px] font-bold text-red-700 uppercase tracking-wider block">Absent</span>
+                <span className="text-lg font-black text-red-800">{monthStats.absentCount} Days</span>
+              </div>
+              <div className="p-3 rounded-2xl bg-blue-50 border border-blue-100 text-center min-w-[105px] flex-1 sm:flex-none">
+                <span className="text-[10px] font-bold text-blue-700 uppercase tracking-wider block">Logged Hours</span>
+                <span className="text-lg font-black text-blue-800">{monthStats.totalHours} hrs</span>
+              </div>
+              <div className="p-3 rounded-2xl bg-purple-50 border border-purple-100 text-center min-w-[95px] flex-1 sm:flex-none">
+                <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider block">Rate</span>
+                <span className="text-lg font-black text-purple-800">{monthStats.rate}%</span>
+              </div>
             </div>
           </div>
         </div>
@@ -606,16 +896,20 @@ export const UserAttendance: React.FC<UserAttendanceProps> = ({ username, userRo
                 <h3 className="text-xl font-black text-slate-900 tracking-tight">
                   {monthNames[viewMonth]} {viewYear}
                 </h3>
-                {isAdmin && (
+                {isAdmin && adminViewMode === 'inspector' ? (
                   <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800">
                     Viewing: {selectedUserObject?.name || selectedUsername}
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
+                    My Attendance Calendar
                   </span>
                 )}
               </div>
               <p className="text-xs text-slate-500 font-medium">
-                {isAdmin
+                {isAdmin && adminViewMode === 'inspector'
                   ? 'Hover over any date to inspect employee logged-in hours and shift times.'
-                  : 'Monthly attendance history. Hover over any date to view your logged-in hours.'}
+                  : 'Monthly attendance history. Hover over any date to view your logged-in hours and shift times.'}
               </p>
             </div>
           </div>

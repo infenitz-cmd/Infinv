@@ -54,7 +54,14 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onSuccess }) => {
             password,
           });
           if (!error && data.user) {
-            onSuccess(cleanUsername);
+            const list = verifyUserCredentials(cleanUsername, password);
+            const userRole = list.user ? list.user.role : 'Staff';
+            const finalUsername = list.user ? list.user.username : cleanUsername;
+            try {
+              localStorage.setItem('infenitz_current_role', userRole);
+              localStorage.setItem('infenitz_current_user', finalUsername);
+            } catch {}
+            onSuccess(finalUsername);
             return;
           }
         } catch {
