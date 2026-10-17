@@ -31,6 +31,7 @@ import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { UserSettings } from './UserSettings';
 import { UserAttendance } from './UserAttendance';
 import { InfenitzAnimation } from './InfenitzAnimation';
+import { BillsView } from './BillsView';
 import { getStoredUsers } from '../lib/userStore';
 import type { UserRole } from '../lib/userStore';
 
@@ -1356,6 +1357,11 @@ export const HomePage: React.FC<HomePageProps> = ({ username, onLogout }) => {
             {activeModule === 'settings' && (
               <UserSettings currentUsername={username} />
             )}
+
+            {/* Bills View */}
+            {activeModule === 'bills' && (
+              <BillsView />
+            )}
           </div>
         ) : (
           <div className="space-y-6">
@@ -1418,8 +1424,8 @@ export const HomePage: React.FC<HomePageProps> = ({ username, onLogout }) => {
               })}
             </div>
 
-            {/* Infenitz Infinite Motion & Logo Showcase in Empty Space */}
-            <InfenitzAnimation />
+            {/* Infenitz Infinite Motion & Logo Showcase in Empty Space with Bills Button in marked area */}
+            <InfenitzAnimation onBillsClick={() => setActiveModule('bills')} />
           </div>
         )}
       </main>

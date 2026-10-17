@@ -1,6 +1,11 @@
 import React from 'react';
+import { Receipt } from 'lucide-react';
 
-export const InfenitzAnimation: React.FC = () => {
+interface InfenitzAnimationProps {
+  onBillsClick?: () => void;
+}
+
+export const InfenitzAnimation: React.FC<InfenitzAnimationProps> = ({ onBillsClick }) => {
   const ribbonPath =
     'M 8 28 C 8 18, 16 10, 24 10 C 30 10, 32 14, 28 20 C 24 26, 14 26, 12 30 C 10 34, 16 34, 24 30 C 32 26, 34 18, 30 12';
 
@@ -153,6 +158,21 @@ export const InfenitzAnimation: React.FC = () => {
               </span>
             </div>
           </div>
+        </div>
+
+        {/* Marked Area: Bills Button */}
+        <div className="absolute bottom-4 right-4 sm:bottom-6 sm:right-6 z-20">
+          <button
+            id="bills-button"
+            onClick={onBillsClick}
+            className="flex items-center gap-2.5 px-4 sm:px-5 py-2 sm:py-2.5 rounded-2xl bg-white/95 hover:bg-white active:bg-slate-50 text-slate-800 font-extrabold text-xs sm:text-sm border border-slate-200/90 shadow-md hover:shadow-xl hover:border-blue-400 hover:text-blue-600 transition-all duration-200 cursor-pointer group hover:-translate-y-0.5 active:translate-y-0"
+            title="Open Bills"
+          >
+            <div className="p-1.5 rounded-xl bg-blue-50 group-hover:bg-blue-600 text-blue-600 group-hover:text-white transition-all shadow-2xs">
+              <Receipt className="w-4 h-4" />
+            </div>
+            <span className="tracking-tight font-black">Bills</span>
+          </button>
         </div>
       </div>
     </div>
